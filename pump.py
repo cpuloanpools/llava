@@ -1,77 +1,73 @@
-import requests
-import json
-from io import BytesIO
-from PIL import Image
 import torch
+import json
+import requests
+from PIL import Image
+from io import BytesIO
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor
 
-from llava.model.builder import load_pretrained_model
-from llava.mm_utils import process_images, tokenizer_image_token
-from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN
+# Constants
+MODEL_DIR = "/workspace/llava-v1.6-mistral-7b-hf"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-
-# Set up LLaVA model
-MODEL_PATH = "/workspace/llava-v1.6-mistral-7b-hf"  # update if stored elsewhere
-tokenizer, model, image_processor, _ = load_pretrained_model(
-    model_path=MODEL_PATH,
-    model_base=None,
-    model_name="llava"
+# Load model components
+print("🔄 Loading model...")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
+processor = AutoProcessor.from_pretrained(MODEL_DIR)
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_DIR,
+    torch_dtype=torch.float16,
+    device_map="auto"
 )
-model.eval()
+print("✅ Model loaded on", DEVICE)
 
-# Your meme prompt
-MEME_PROMPT = """
-You are a degen meme coin creator. Your role is to generate wild, catchy, short meme-style token names and tickers based on a provided tweet text and image URL. You prioritize humor, virality, and fitting into the meme coin culture. You must strictly follow these rules: 
+# Prompt rules
+PROMPT_TEMPLATE = """
+You are a degen meme coin creator. Your role is to generate wild, catchy, short meme-style token names and tickers based on a provided tweet text and image.
 
-- Input will be Tweet text and Image URL
-- Analyze both the tweet text and The Image along with the visible text inside the image.
-- The vibe of the tweet and image (funny, hype, crypto culture, absurd) must inspire the token name.
-- Output must be exactly two things: Token Name and Ticker.
-- No explanation, no extra commentary.
-- If the token name has multiple words, include spaces between them.
-- If a specific object is named in the tweet or image, set the ticker as that object’s name.
-- If a prominent or famous person is shown in the image, that person becomes the main object.
-- If the image has unique visible text, use that text as the token name, and create the ticker by taking the first letter of each word.
-- Remember If the token name is 10 characters or fewer, use the same name as the ticker Without spaces.
-- The ticker must always reflect the main highlight of the tweet or image.
-- Ticker cannot have spaces and it cannot be more than 10 letters
-- Output should in the form of a JSON object
-{ "tokenName": "generated_token_name", "ticker": "generated_ticker_name" }
+- Analyze both the tweet and image content.
+- Output exactly: {{ "tokenName": "...", "ticker": "..." }}
+- No extra text or explanation.
+- Ticker must be <=10 chars, ALL CAPS, no spaces.
+- If the token name is <=10 chars, use it as the ticker.
+- If image has visible text, use that as token name and take first letter of each word as ticker.
+"""
 
-You must stick exactly to these rules without exception. Prioritize wildness and absurdity, but always stay accurate to the text and image provided.
+def load_image_from_url(url):
+    try:
+        response = requests.get(url)
+        image = Image.open(BytesIO(response.content)).convert("RGB")
+        return image
+    except Exception as e:
+        raise RuntimeError(f"Error loading image: {e}")
 
-Now, behave exactly according to the above instructions every time you are given a tweet text and/or an image URL.
-"""  # (keep the full prompt as in your original)
+def generate_token(tweet, image_url):
+    image = load_image_from_url(image_url)
 
-# Download image and convert to tensor
-def image_url_to_tensor(url):
-    headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(url, headers=headers, timeout=10)
-    response.raise_for_status()
-    img = Image.open(BytesIO(response.content)).convert("RGB")
-    tensor = process_images([img], image_processor, model.config)[0].unsqueeze(0).to(model.device)
-    return tensor
+    inputs = processor(
+        text=PROMPT_TEMPLATE + f"\nTweet: {tweet}",
+        images=image,
+        return_tensors="pt"
+    ).to(DEVICE, torch.float16)
 
-# Run LLaVA generation
-def ask_llava(prompt, image_tensor):
-    formatted_prompt = DEFAULT_IMAGE_TOKEN + "\n" + prompt
-    input_ids = tokenizer_image_token(formatted_prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").to(model.device)
-    output_ids = model.generate(**input_ids, images=image_tensor, max_new_tokens=200)
-    return tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    output = model.generate(**inputs, max_new_tokens=100)
+    decoded = tokenizer.decode(output[0], skip_special_tokens=True)
 
-# CLI flow
-def main():
-    print("🧠 Meme Token Generator (LLaVA-Next Mistral)")
+    # Extract JSON from model output
+    try:
+        json_str = decoded[decoded.index("{"):decoded.index("}")+1]
+        parsed = json.loads(json_str)
+        return parsed
+    except Exception:
+        return {
+            "tokenName": "UNKNOWN",
+            "ticker": "FAILED"
+        }
+
+# --- CLI ---
+if __name__ == "__main__":
     tweet = input("Paste the tweet text:\n> ").strip()
     image_url = input("Paste the image URL:\n> ").strip()
-    print("\n⏳ Generating...\n")
 
-    try:
-        image_tensor = image_url_to_tensor(image_url)
-        prompt = f"{MEME_PROMPT}\nTweet: {tweet}"
-        result = ask_llava(prompt, image_tensor)
-        print("✅ Output:\n" + result.strip())
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
-
-if __name__ == "__main__":
-    main()
+    print("\n🚀 Generating Token...")
+    result = generate_token(tweet, image_url)
+    print("\n✅ Result:\n", json.dumps(result, indent=2))
