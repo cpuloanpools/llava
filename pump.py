@@ -1,70 +1,53 @@
 import torch
-import json
-import requests
 from PIL import Image
+from transformers import TextStreamer
+from llava.model.builder import load_pretrained_model
+from llava.mm_utils import process_images, tokenizer_image_token, get_model_name_from_path
+from llava.conversation import conv_templates
+import requests
 from io import BytesIO
-from transformers import LlavaForConditionalGeneration, AutoProcessor
 
-# Constants
-MODEL_DIR = "/workspace/llava-v1.6-mistral-7b-hf"
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# ==== Settings ====
+model_path = "/workspace/llava-v1.6-mistral-7b-hf"
+image_url = input("Paste image URL:\n> ").strip()
+tweet = input("Paste tweet text:\n> ").strip()
 
-# Load model components
-print("🔄 Loading model...")
-processor = AutoProcessor.from_pretrained(MODEL_DIR)
-model = LlavaForConditionalGeneration.from_pretrained(
-    MODEL_DIR,
-    torch_dtype=torch.float16,
-    device_map="auto"
+# ==== Load Image ====
+response = requests.get(image_url)
+image = Image.open(BytesIO(response.content)).convert("RGB")
+
+# ==== Load Model ====
+tokenizer, model, processor, context_len = load_pretrained_model(
+    model_path, model_path, model_name="llava-v1.6-mistral-7b-hf"
 )
-print("✅ Model loaded on", DEVICE)
+model.eval()
+model.cuda()
 
-# Prompt template
-PROMPT_TEMPLATE = """
-You are a degen meme coin creator. Your role is to generate wild, catchy, short meme-style token names and tickers based on a provided tweet text and image.
+# ==== Prepare Input ====
+image_tensor = process_images([image], processor, model.config).to(dtype=torch.float16, device="cuda")
+prompt_template = """
+You are a meme coin creator. Generate a catchy token name and ticker based on this tweet and image.
+Tweet: {tweet}
+Output in JSON format like: {{ "tokenName": "NAME", "ticker": "TICKER" }}
+""".strip()
 
-- Analyze both the tweet and image content.
-- Output exactly: {{ "tokenName": "...", "ticker": "..." }}
-- No extra text or explanation.
-- Ticker must be <=10 chars, ALL CAPS, no spaces.
-- If the token name is <=10 chars, use it as the ticker.
-- If image has visible text, use that as token name and take first letter of each word as ticker.
-"""
+conv = conv_templates["llava_v1"].copy()
+conv.append_message(conv.roles[0], prompt_template.format(tweet=tweet))
+conv.append_message(conv.roles[1], None)
 
-def load_image_from_url(url):
-    try:
-        response = requests.get(url)
-        image = Image.open(BytesIO(response.content)).convert("RGB")
-        return image
-    except Exception as e:
-        raise RuntimeError(f"❌ Error loading image: {e}")
+input_ids = tokenizer_image_token(
+    conv.get_prompt(), tokenizer, processor, image_tensor
+)
 
-def generate_token(tweet, image_url):
-    image = load_image_from_url(image_url)
+# ==== Generate ====
+output_ids = model.generate(
+    input_ids=input_ids,
+    images=image_tensor,
+    do_sample=False,
+    temperature=0.2,
+    max_new_tokens=120,
+    use_cache=True
+)
 
-    inputs = processor(
-        text=PROMPT_TEMPLATE + f"\nTweet: {tweet}",
-        images=image,
-        return_tensors="pt"
-    ).to(DEVICE)
-
-    output = model.generate(**inputs, max_new_tokens=100)
-    decoded = processor.tokenizer.decode(output[0], skip_special_tokens=True)
-
-    try:
-        json_str = decoded[decoded.index("{"):decoded.index("}") + 1]
-        return json.loads(json_str)
-    except Exception:
-        return {
-            "tokenName": "UNKNOWN",
-            "ticker": "FAILED"
-        }
-
-# CLI
-if __name__ == "__main__":
-    tweet = input("Paste the tweet text:\n> ").strip()
-    image_url = input("Paste the image URL:\n> ").strip()
-
-    print("\n🚀 Generating Token...")
-    result = generate_token(tweet, image_url)
-    print("\n✅ Result:\n", json.dumps(result, indent=2))
+output = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+print("\n✅ Output:\n", output)
