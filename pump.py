@@ -3,7 +3,7 @@ import json
 import requests
 from PIL import Image
 from io import BytesIO
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor
+from transformers import LlavaForConditionalGeneration, AutoProcessor
 
 # Constants
 MODEL_DIR = "/workspace/llava-v1.6-mistral-7b-hf"
@@ -11,16 +11,15 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Load model components
 print("🔄 Loading model...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
 processor = AutoProcessor.from_pretrained(MODEL_DIR)
-model = AutoModelForCausalLM.from_pretrained(
+model = LlavaForConditionalGeneration.from_pretrained(
     MODEL_DIR,
     torch_dtype=torch.float16,
     device_map="auto"
 )
 print("✅ Model loaded on", DEVICE)
 
-# Prompt rules
+# Prompt template
 PROMPT_TEMPLATE = """
 You are a degen meme coin creator. Your role is to generate wild, catchy, short meme-style token names and tickers based on a provided tweet text and image.
 
@@ -38,7 +37,7 @@ def load_image_from_url(url):
         image = Image.open(BytesIO(response.content)).convert("RGB")
         return image
     except Exception as e:
-        raise RuntimeError(f"Error loading image: {e}")
+        raise RuntimeError(f"❌ Error loading image: {e}")
 
 def generate_token(tweet, image_url):
     image = load_image_from_url(image_url)
@@ -47,23 +46,21 @@ def generate_token(tweet, image_url):
         text=PROMPT_TEMPLATE + f"\nTweet: {tweet}",
         images=image,
         return_tensors="pt"
-    ).to(DEVICE, torch.float16)
+    ).to(DEVICE)
 
     output = model.generate(**inputs, max_new_tokens=100)
-    decoded = tokenizer.decode(output[0], skip_special_tokens=True)
+    decoded = processor.tokenizer.decode(output[0], skip_special_tokens=True)
 
-    # Extract JSON from model output
     try:
-        json_str = decoded[decoded.index("{"):decoded.index("}")+1]
-        parsed = json.loads(json_str)
-        return parsed
+        json_str = decoded[decoded.index("{"):decoded.index("}") + 1]
+        return json.loads(json_str)
     except Exception:
         return {
             "tokenName": "UNKNOWN",
             "ticker": "FAILED"
         }
 
-# --- CLI ---
+# CLI
 if __name__ == "__main__":
     tweet = input("Paste the tweet text:\n> ").strip()
     image_url = input("Paste the image URL:\n> ").strip()
